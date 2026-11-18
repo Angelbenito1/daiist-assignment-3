@@ -6,8 +6,7 @@ __pycache__/
 *.pyc
 
 # Documents downloaded by your index stage. Commit them only if their licence allows it.
-corpus/*
-!corpus/README.md
+# EUR-Lex texts may be reused with source acknowledged (see corpus/README.md), so corpus/raw/ is committed.
 
 # Personal study notes (not part of the submission)
 ESTUDIO.md

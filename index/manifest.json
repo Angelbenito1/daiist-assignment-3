@@ -1,0 +1,35 @@
+{
+  "model": "gemini-embedding-2",
+  "dim": 768,
+  "indexed_kinds": [
+    "article",
+    "annex"
+  ],
+  "initial_corpus": [
+    "L_2016119EN.01000101.xml.html",
+    "L_202401689EN.000101.fmx.xml.html",
+    "L_202302854EN.000101.fmx.xml.html"
+  ],
+  "held_out": [
+    "L_2022333EN.01008001.xml.html"
+  ],
+  "designs": {
+    "article": {
+      "chunks": 284,
+      "new": 284,
+      "stored": 284,
+      "missing": 0,
+      "removed_stale": 0,
+      "in_collection": 284
+    },
+    "paragraph": {
+      "chunks": 693,
+      "new": 585,
+      "stored": 693,
+      "missing": 0,
+      "removed_stale": 0,
+      "in_collection": 693
+    }
+  },
+  "updated": "2026-11-18T10:14:01"
+}
