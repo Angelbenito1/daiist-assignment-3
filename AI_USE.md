@@ -1,0 +1,8 @@
+# AI use log
+
+Running log of what an AI assistant (Claude Code, model Claude Opus 5.5) generated or helped with, for the AI-use disclosure in REPORT.md. Decisions, the test set, human grades and the report's analysis are written by the student.
+
+| Date | Phase | What the AI did | What the student did |
+|---|---|---|---|
+| 2026-11-18 | 0. Setup | Ran `uv sync`; inspected the four EUR-Lex HTML files (titles, raw word counts); drafted `corpus/README.md` (source, date, licence, language); created this log; adjusted `.gitignore` so `corpus/README.md` is committed. | Chose English as corpus language; set the deadline; created `.env` with own key; forked the repo; makes all commits. |
+| 2026-11-18 | 1. Corpus and budget | Inspected EUR-Lex HTML structure; wrote the parser in `ingest.py` (units with source/location, definition-point splitting, footnote removal, Unicode cleaning); computed word counts per section and chunk/embedding estimates per design and scope. | Chose scope B (articles + annexes, no recitals). |

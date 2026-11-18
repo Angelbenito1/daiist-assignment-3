@@ -6,7 +6,11 @@ __pycache__/
 *.pyc
 
 # Documents downloaded by your index stage. Commit them only if their licence allows it.
-corpus/
+corpus/*
+!corpus/README.md
+
+# Personal study notes (not part of the submission)
+ESTUDIO.md
 
 # Your index belongs in index/, committed. Your evaluation results belong in eval/, committed.
 
