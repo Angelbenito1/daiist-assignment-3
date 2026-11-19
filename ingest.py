@@ -549,6 +549,9 @@ def store_chunks(chunks: list[Chunk], budget: int | None = None, client=None) ->
     for design, items in by_design.items():
         col = collection(design, client)
         unique = list({c.id: (c, v) for c, v in items}.values())
+        # Skip chunks already stored: every upsert is logged inside chroma.sqlite3 and grows index/.
+        existing = set(col.get(ids=[c.id for c, _ in unique], include=[])["ids"]) if unique else set()
+        unique = [(c, v) for c, v in unique if c.id not in existing]
         for i in range(0, len(unique), 500):
             part = unique[i:i + 500]
             col.upsert(ids=[c.id for c, _ in part], embeddings=[v.tolist() for _, v in part],
