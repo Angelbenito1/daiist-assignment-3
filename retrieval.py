@@ -20,6 +20,11 @@ from functools import lru_cache
 from ingest import collection, embed_query
 
 METHODS = ("vector", "filter", "hybrid")
+
+# What the server and the agent use. PROVISIONAL until the Phase 4 decision (chosen by hit rate).
+SERVED_DESIGN = "paragraph"
+SERVED_METHOD = "vector"
+DEFAULT_K = 5
 CANDIDATES = 50          # how many candidates each ranker contributes before fusion
 RRF_K = 60               # standard reciprocal-rank-fusion constant
 

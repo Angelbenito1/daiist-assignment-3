@@ -485,6 +485,9 @@ def _embed_batch(texts: list[str], task: str) -> list[np.ndarray]:
             msg = str(e)
             m = re.search(r"retry in ([\d.]+)s", msg) or re.search(r"retryDelay.{0,5}?(\d+)s", msg)
             wait = float(m.group(1)) + 1 if m else 20 * (attempt + 1)
+            if wait > 120:   # a per-minute limit never asks for minutes of waiting: this is the daily one
+                raise QuotaExhausted(f"Gemini asks to wait {wait:.0f}s: daily embedding quota reached (resets 09:00 Spain time).") from e
+            wait = min(wait, 70)
             # A per-minute 429 can also mention per-day metrics, so only give up after
             # the "daily" message survives two one-minute waits.
             if "PerDay" in msg or "per day" in msg.lower():
@@ -582,3 +585,54 @@ def index_file(path: str | Path, designs=DESIGNS, budget: int | None = None, cli
     meta, chunks = chunk_file(path, designs)
     stats = store_chunks(chunks, budget=budget, client=client)
     return {**meta, **stats}
+
+
+# ================================================================ add a document (used by server.py)
+
+def add_document(path: str | Path, designs=DESIGNS, client=None) -> dict:
+    """Index one more EUR-Lex HTML act, with the duplicate policy decided in Phase 5.
+
+    The act is identified by its CELEX number (or file name if it has none):
+      - same act, identical chunks  -> "already indexed", nothing embedded or written;
+      - same act, different chunks  -> "replaced": new chunks stored (unchanged text reuses
+        cached vectors, so only changed chunks cost quota), outdated chunks deleted;
+      - new act                     -> "added".
+    Old chunks are only deleted once every new chunk is stored, so a quota stop
+    never leaves the act half-replaced.
+    """
+    path = Path(path)
+    meta, units = parse_file(path)
+    if not any(u.kind in INDEXED_KINDS for u in units):
+        raise ValueError(f"{path.name}: no articles or annexes found; add_document expects an EUR-Lex HTML act.")
+    client = client or chroma()
+    key = {"celex": meta["celex"]} if meta["celex"] else {"source_file": path.name}
+    report = {"doc": meta["doc"], "celex": meta["celex"], "title": meta["title"], "designs": {}}
+    for design in designs:
+        chunks = chunk_units(units, design, path.name)
+        col = collection(design, client)
+        existing = set(col.get(where=key, include=[])["ids"])
+        new_ids = {c.id for c in chunks}
+        if existing == new_ids:
+            report["designs"][design] = {"status": "already indexed", "chunks": len(chunks), "new_embeddings": 0}
+            continue
+        stats = store_chunks(chunks, client=client)
+        removed = 0
+        if stats["missing"] == 0 and existing - new_ids:
+            col.delete(ids=list(existing - new_ids))
+            removed = len(existing - new_ids)
+        status = "incomplete" if stats["missing"] else ("replaced" if existing else "added")
+        report["designs"][design] = {"status": status, "chunks": len(chunks), "new_embeddings": stats["new"],
+                                     "removed_outdated": removed}
+    if any(r["status"] != "already indexed" for r in report["designs"].values()):
+        _record_added(path, report)
+    return report
+
+
+def _record_added(path: Path, report: dict) -> None:
+    """Note documents added after the initial build in index/manifest.json."""
+    manifest = json.loads(MANIFEST_PATH.read_text()) if MANIFEST_PATH.is_file() else {}
+    added = manifest.setdefault("added_documents", {})
+    added[path.name] = {"doc": report["doc"], "celex": report["celex"],
+                        "designs": {d: r["status"] for d, r in report["designs"].items()},
+                        "date": date.today().isoformat()}
+    MANIFEST_PATH.write_text(json.dumps(manifest, indent=2))
