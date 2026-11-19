@@ -16,28 +16,28 @@
   "designs": {
     "article": {
       "chunks": 284,
-      "new": 0,
+      "new": 1,
       "stored": 284,
       "missing": 0,
-      "removed_stale": 0,
+      "removed_stale": 1,
       "in_collection": 284
     },
     "paragraph": {
       "chunks": 693,
-      "new": 0,
+      "new": 1,
       "stored": 693,
       "missing": 0,
-      "removed_stale": 0,
+      "removed_stale": 1,
       "in_collection": 693
     },
     "fixed": {
       "chunks": 854,
-      "new": 0,
+      "new": 1,
       "stored": 854,
       "missing": 0,
-      "removed_stale": 0,
+      "removed_stale": 1,
       "in_collection": 854
     }
   },
-  "updated": "2026-11-19T10:27:40"
+  "updated": "2026-11-19T10:52:35"
 }

@@ -100,7 +100,7 @@ def clean(text: str) -> str:
     text = unicodedata.normalize("NFKC", text)
     text = text.replace("’", "'").replace("‘", "'").replace("“", '"').replace("”", '"')
     text = re.sub(r"\s+", " ", text)
-    text = re.sub(r"\s+([.,;:)])", r"\1", text)   # 'Union .' -> 'Union.' (left by inline tags)
+    text = re.sub(r"\s+([.,;:)^])", r"\1", text)  # 'Union .' -> 'Union.', '10 ^25' -> '10^25' (left by inline tags)
     return re.sub(r"\(\s+", "(", text).strip()
 
 
@@ -133,6 +133,9 @@ def strip_noise(soup: BeautifulSoup) -> None:
         marker.decompose()
     for marker in soup.select("span.oj-note-tag"):
         marker.decompose()
+    # Superscripts carry meaning (AI Act Art. 51(2): 10^25 FLOPs); without this they read "10 25".
+    for sup in soup.select("span.oj-super"):
+        sup.replace_with("^" + sup.get_text(strip=True))
 
 
 # ---------------------------------------------------------------- document identity
@@ -464,7 +467,8 @@ def _embed_batch(texts: list[str], task: str) -> list[np.ndarray]:
     """One API call, retrying on per-minute rate limits; raises QuotaExhausted on the daily one."""
     from google.genai import types
     from google.genai.errors import ClientError
-    for attempt in range(6):
+    daily_hits = 0
+    for attempt in range(8):
         try:
             # gemini-embedding-2 is multimodal: a plain list of strings is read as ONE
             # content with many parts and returns ONE vector. Wrap each text in its own Content.
@@ -479,10 +483,16 @@ def _embed_batch(texts: list[str], task: str) -> list[np.ndarray]:
             if e.code != 429:
                 raise
             msg = str(e)
-            if "PerDay" in msg or "per day" in msg.lower():
-                raise QuotaExhausted("Daily embedding quota reached (resets 09:00 Spain time).") from e
             m = re.search(r"retry in ([\d.]+)s", msg) or re.search(r"retryDelay.{0,5}?(\d+)s", msg)
             wait = float(m.group(1)) + 1 if m else 20 * (attempt + 1)
+            # A per-minute 429 can also mention per-day metrics, so only give up after
+            # the "daily" message survives two one-minute waits.
+            if "PerDay" in msg or "per day" in msg.lower():
+                daily_hits += 1
+                log(f"  429 mentioning a daily limit ({daily_hits}/3): {msg[:300]}")
+                if daily_hits >= 3:
+                    raise QuotaExhausted("Daily embedding quota reached (resets 09:00 Spain time).") from e
+                wait = max(wait, 65)
             log(f"  rate limited, waiting {wait:.0f}s")
             time.sleep(wait)
     raise QuotaExhausted("Still rate limited after several retries; try again later.")
