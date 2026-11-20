@@ -21,7 +21,8 @@ from ingest import collection, embed_query
 
 METHODS = ("vector", "filter", "hybrid")
 
-# What the server and the agent use. PROVISIONAL until the Phase 4 decision (chosen by hit rate).
+# What the server and the agent use. Phase 4 decision, by hit rate (eval/retrieval_summary.csv):
+# paragraph + vector had the best hit@1 (0.556) and hit@5 (0.889) with ~930 words per search at k=5.
 SERVED_DESIGN = "paragraph"
 SERVED_METHOD = "vector"
 DEFAULT_K = 5

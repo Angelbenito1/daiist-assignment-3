@@ -16,10 +16,10 @@
   "designs": {
     "article": {
       "chunks": 284,
-      "new": 1,
+      "new": 0,
       "stored": 284,
       "missing": 0,
-      "removed_stale": 1,
+      "removed_stale": 0,
       "in_collection": 284
     },
     "paragraph": {
@@ -32,12 +32,12 @@
     },
     "fixed": {
       "chunks": 854,
-      "new": 1,
+      "new": 92,
       "stored": 854,
       "missing": 0,
-      "removed_stale": 1,
+      "removed_stale": 242,
       "in_collection": 854
     }
   },
-  "updated": "2026-11-19T10:52:35"
+  "updated": "2026-11-20T10:36:19"
 }
