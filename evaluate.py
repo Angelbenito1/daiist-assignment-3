@@ -448,6 +448,15 @@ def main() -> int:
     if a.stage in ("nis2", "all"):
         print("\n== Before / after adding NIS2")
         before_after(questions, read_jsonl(ANSWERS))
+
+    failures = EVAL / "failures.csv"   # human classification of every question I graded 0 (Phase 8)
+    if a.stage == "all" and failures.is_file():
+        f = pd.read_csv(failures)
+        causes = ["retrieval miss", "wrong answer from right passage", "unsupported claim", "wrong refusal", "bad test question"]
+        print(f"\n== Failures by cause ({len(f)} questions with correct=0 or supported=0 in my labels)")
+        for c in causes:
+            ids = ", ".join(f.loc[f.cause == c, "id"])
+            print(f"  {c:32} {int((f.cause == c).sum())}  {ids}")
     return 0
 
 
