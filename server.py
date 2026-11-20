@@ -15,7 +15,7 @@ from pathlib import Path
 from mcp.server.mcpserver import MCPServer
 
 from ingest import QuotaExhausted, add_document as ingest_add_document, log
-from retrieval import DEFAULT_K, SERVED_DESIGN, SERVED_METHOD, search as retrieve
+from retrieval import DEFAULT_K, SERVED_DESIGN, SERVED_METHOD, SIMILARITY_FLOOR, search as retrieve
 
 ROOT = Path(__file__).resolve().parent
 
@@ -54,6 +54,9 @@ def search(query: str) -> str:
         hits = retrieve(query, design=SERVED_DESIGN, method=SERVED_METHOD, k=DEFAULT_K)
     except QuotaExhausted as e:
         return f"Search unavailable: {e} Do not answer from memory; tell the user to try again later."
+    if hits and hits[0]["score"] is not None and hits[0]["score"] < SIMILARITY_FLOOR:
+        return (f"No relevant passages found for: {query} (best similarity {hits[0]['score']:.3f} is below "
+                f"{SIMILARITY_FLOOR}). The indexed legislation does not appear to cover this question.")
     return format_hits(query, hits)
 
 

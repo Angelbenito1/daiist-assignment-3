@@ -26,6 +26,20 @@ METHODS = ("vector", "filter", "hybrid")
 SERVED_DESIGN = "paragraph"
 SERVED_METHOD = "vector"
 DEFAULT_K = 5
+
+# Phase 6 decision (refusal = LLM self-assessment + safety floor). Below this top-1 similarity the
+# search tool reports "no relevant passages". 0.60 is under every test-set score (min 0.675), so it
+# only catches clearly off-topic queries; the model decides everything else.
+SIMILARITY_FLOOR = 0.60
+
+
+def article_key(location: str) -> str:
+    """'Article 33(1)-(2)' -> 'Article 33'; 'Annex III, points (4) to (5)' -> 'Annex III'; 'Art. 6' -> 'Article 6'."""
+    m = re.match(r"\s*(Article|Art\.?|Annex)\s+(\d+[a-z]?|[IVXLC]+)\b", location, re.I)
+    if not m:
+        return location.strip()
+    word = "Annex" if m.group(1).lower() == "annex" else "Article"
+    return f"{word} {m.group(2).upper() if word == 'Annex' else m.group(2)}"
 CANDIDATES = 50          # how many candidates each ranker contributes before fusion
 RRF_K = 60               # standard reciprocal-rank-fusion constant
 

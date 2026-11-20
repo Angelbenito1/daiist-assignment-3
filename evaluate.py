@@ -25,7 +25,7 @@ from pathlib import Path
 import pandas as pd
 
 from ingest import DESIGNS
-from retrieval import METHODS, search
+from retrieval import METHODS, article_key, search
 
 ROOT = Path(__file__).resolve().parent
 EVAL = ROOT / "eval"
@@ -46,15 +46,6 @@ def read_questions(path: Path) -> list[dict]:
             sources = sources * len(locations)
         r["expected"] = [(s, article_key(l)) for s, l in zip(sources, locations)]
     return rows
-
-
-def article_key(location: str) -> str:
-    """'Article 33(1)' -> 'Article 33'; 'Annex III, point 4' -> 'Annex III'."""
-    m = re.match(r"\s*(Article\s+\d+[a-z]?|Annex\s+[IVXLC]+)", location, re.I)
-    if not m:
-        return location.strip()
-    word, num = m.group(1).split()
-    return f"{word.capitalize()} {num if word.lower() == 'article' else num.upper()}"
 
 
 def first_rank(hits: list[dict], source: str, key: str) -> int | None:
