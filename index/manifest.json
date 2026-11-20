@@ -39,5 +39,15 @@
       "in_collection": 854
     }
   },
-  "updated": "2026-11-20T10:36:19"
+  "updated": "2026-11-20T10:36:19",
+  "added_documents": {
+    "L_2022333EN.01008001.xml.html": {
+      "doc": "NIS2",
+      "celex": "32022L2555",
+      "designs": {
+        "paragraph": "added"
+      },
+      "date": "2026-11-20"
+    }
+  }
 }

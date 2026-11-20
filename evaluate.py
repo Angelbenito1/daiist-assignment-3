@@ -231,22 +231,53 @@ def write_label_sheet(questions: list[dict], answers: dict) -> None:
     LABEL_SHEET.write_text("\n".join(lines), encoding="utf-8")
 
 
+# Judge v1 (results kept in eval/*_v1.*) asked for the scores first and a reason after: it gave 1 to
+# all 35 answers (kappa 0 vs the human labels). v2 makes the judge reason before scoring: list every
+# element of the reference and whether the answer contains it, list claims missing from the passages,
+# and only then score. Same rubric, same model.
+JUDGE_VERSION = "v2"
+
+
+class Element(BaseModel):
+    element: str = Field(description="one fact, condition, exception or passage required by the reference answer")
+    present: bool = Field(description="true only if the assistant answer states it (paraphrase allowed)")
+
+
 class Verdict(BaseModel):
-    correct: int = Field(description="1 or 0, following the rubric")
+    reference_elements: list[Element]
+    answers_as_if_covered: bool = Field(
+        description="unanswerable questions: true if the answer gives a substantive answer instead of only "
+                    "saying the corpus does not cover it; false for answerable questions")
+    claims_not_in_passages: list[str] = Field(
+        description="every claim or citation in the answer that the retrieved passages do not state; empty if none")
     correct_reason: str
-    supported: int = Field(description="1 or 0, following the rubric")
+    correct: int = Field(description="1 or 0, following the rubric and the lists above")
     supported_reason: str
+    supported: int = Field(description="1 if claims_not_in_passages is empty, else 0")
+
+
+JUDGE_STEPS = """## Procedure (follow in this order)
+1. Split the reference answer into its elements (each fact, number, condition, exception; for `multi`
+   questions, the content of each passage). For an unanswerable question the single element is
+   "says the indexed legislation does not cover the question".
+2. For each element, decide whether the assistant answer states it. Missing = present false.
+3. Unanswerable questions: set answers_as_if_covered = true if the answer goes on to give a substantive
+   answer (rules, obligations, articles) rather than only saying it is not covered and where to look.
+4. Read every claim and citation in the assistant answer and list those the retrieved passages do not state.
+5. correct = 1 only if every element is present and nothing contradicts the reference; for unanswerable
+   questions, only if the answer says it is not covered and answers_as_if_covered is false. Otherwise 0.
+6. supported = 1 only if the list from step 4 is empty."""
 
 
 def judge_one(q: dict, a: dict, rubric: str) -> dict:
     from google.genai import types
     from ingest import _gemini
-    prompt = (f"You are grading an answer of a legal question-answering assistant.\n\n{rubric}\n\n"
+    prompt = (f"You are grading an answer of a legal question-answering assistant. Be strict.\n\n{rubric}\n\n"
+              f"{JUDGE_STEPS}\n\n"
               f"## Item to grade\n\nQuestion kind: {q['kind']}\n\nQuestion: {q['question']}\n\n"
               f"Reference answer: {q['reference_answer']}\n\n"
               f"Retrieved passages:\n<<<\n{a['retrieved_text'] or '(the assistant did not search)'}\n>>>\n\n"
-              f"Assistant answer:\n<<<\n{a['answer']}\n>>>\n\n"
-              "Return the two scores with a one- or two-sentence reason each.")
+              f"Assistant answer:\n<<<\n{a['answer']}\n>>>")
     for attempt in range(5):
         try:
             r = _gemini().models.generate_content(
@@ -264,7 +295,7 @@ def judge_one(q: dict, a: dict, rubric: str) -> dict:
 
 def run_judge(questions: list[dict], answers: dict) -> dict[str, dict]:
     rubric = RUBRIC.read_text(encoding="utf-8")
-    rubric_hash = hashlib.sha256(rubric.encode()).hexdigest()[:12]
+    rubric_hash = hashlib.sha256((rubric + JUDGE_VERSION + JUDGE_STEPS).encode()).hexdigest()[:12]
     have = read_jsonl(JUDGMENTS)
     for q in questions:
         a = answers[q["id"]]
@@ -272,7 +303,7 @@ def run_judge(questions: list[dict], answers: dict) -> dict[str, dict]:
         if q["id"] in have and have[q["id"]].get("key") == key:
             continue
         v = judge_one(q, a, rubric)
-        append_jsonl(JUDGMENTS, {"id": q["id"], "key": key, "model": JUDGE_MODEL, **v})
+        append_jsonl(JUDGMENTS, {"id": q["id"], "key": key, "model": JUDGE_MODEL, "version": JUDGE_VERSION, **v})
         print(f"  judged {q['id']}: correct={v['correct']} supported={v['supported']}", file=sys.stderr, flush=True)
     return read_jsonl(JUDGMENTS)   # last line per id wins
 
@@ -353,13 +384,23 @@ def before_after(questions: list[dict], answers: dict) -> None:
         return
     picked = [q for q in questions if q["id"] in NIS2_QUESTIONS]
     after = collect_answers(picked, NIS2_AFTER)
-    lines = ["# Before / after adding NIS2 (Directive (EU) 2022/2555) with add_document", ""]
+    first_after = read_jsonl(EVAL / "nis2_after_v1.jsonl")   # before the corpus-description fix
+    lines = ["# Before / after adding NIS2 (Directive (EU) 2022/2555) with add_document", "",
+             "1. **Before**: index = GDPR, AI Act, Data Act.",
+             "2. **After, first try**: NIS2 indexed and retrieved, but the search tool description and AGENTS.md "
+             "still listed only three acts, so the agent treated NIS2 passages as outside the corpus.",
+             "3. **After the fix**: every search result starts with the acts read from the index, and AGENTS.md says "
+             "every listed act is part of the corpus.", ""]
     for q in picked:
         b, a = answers[q["id"]], after[q["id"]]
         lines += [f"## {q['id']}: {q['question']}", "",
-                  f"**Before** (GDPR, AI Act, Data Act; refused={b['refused']}; cited: {', '.join(b['citations']) or 'none'})", "",
-                  b["answer"], "",
-                  f"**After** (+ NIS2; refused={a['refused']}; cited: {', '.join(a['citations']) or 'none'})", "",
+                  f"**1. Before** (refused={b['refused']}; retrieved: {', '.join(b['retrieved']) or 'none'})", "",
+                  b["answer"], ""]
+        if q["id"] in first_after:
+            f = first_after[q["id"]]
+            lines += [f"**2. After, first try** (refused={f['refused']}; retrieved: {', '.join(f['retrieved']) or 'none'})", "",
+                      f["answer"], ""]
+        lines += [f"**3. After the fix** (refused={a['refused']}; cited: {', '.join(a['citations']) or 'none'})", "",
                   a["answer"], "", "---", ""]
     (EVAL / "before_after.md").write_text("\n".join(lines), encoding="utf-8")
     for q in picked:

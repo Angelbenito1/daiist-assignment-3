@@ -15,7 +15,7 @@ from pathlib import Path
 from mcp.server.mcpserver import MCPServer
 
 from ingest import QuotaExhausted, add_document as ingest_add_document, log
-from retrieval import DEFAULT_K, SERVED_DESIGN, SERVED_METHOD, SIMILARITY_FLOOR, search as retrieve
+from retrieval import DEFAULT_K, SERVED_DESIGN, SERVED_METHOD, SIMILARITY_FLOOR, indexed_acts, search as retrieve
 
 ROOT = Path(__file__).resolve().parent
 
@@ -23,9 +23,10 @@ mcp = MCPServer("corpus", log_level="WARNING")
 
 
 def format_hits(query: str, hits: list[dict]) -> str:
+    acts = f"Indexed acts (all part of the corpus): {', '.join(indexed_acts())}"
     if not hits:
-        return f"No passages found for: {query}"
-    lines = [f"{len(hits)} passages for: {query}", ""]
+        return f"{acts}\nNo passages found for: {query}"
+    lines = [acts, f"{len(hits)} passages for: {query}", ""]
     for i, h in enumerate(hits, 1):
         score = f"similarity {h['score']:.3f}" if h.get("score") is not None else "keyword match"
         lines.append(f"[{i}] {h['doc']} {h['location']} ({score})")
@@ -46,8 +47,9 @@ def search(query: str) -> str:
     under these laws. Write the query as a natural-language question or topic in English;
     call it again with other wording, or once per regulation, if the first results miss.
 
-    Returns the most relevant passages, each with its citation (regulation, article and
-    paragraph, e.g. "GDPR Article 33(1)"), a similarity score and the legal text.
+    Returns the list of acts currently indexed (documents added later appear there and are
+    part of the corpus), then the most relevant passages, each with its citation (act,
+    article and paragraph, e.g. "GDPR Article 33(1)"), a similarity score and the legal text.
     A passage that is only loosely related does not answer the question.
     """
     try:

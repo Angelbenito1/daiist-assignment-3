@@ -33,6 +33,17 @@ DEFAULT_K = 5
 SIMILARITY_FLOOR = 0.60
 
 
+@lru_cache(maxsize=None)
+def _acts(design: str, count: int) -> tuple[str, ...]:
+    got = collection(design).get(include=["metadatas"])
+    return tuple(sorted({m["doc"] for m in got["metadatas"]}))
+
+
+def indexed_acts(design: str = SERVED_DESIGN) -> list[str]:
+    """Acts currently in the index, read from the index itself (so documents added later show up)."""
+    return list(_acts(design, collection(design).count()))
+
+
 def article_key(location: str) -> str:
     """'Article 33(1)-(2)' -> 'Article 33'; 'Annex III, points (4) to (5)' -> 'Annex III'; 'Art. 6' -> 'Article 6'."""
     m = re.match(r"\s*(Article|Art\.?|Annex)\s+(\d+[a-z]?|[IVXLC]+)\b", location, re.I)
