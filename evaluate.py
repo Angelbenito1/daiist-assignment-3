@@ -3,12 +3,20 @@ Assignment 3: evaluation (`main.py evaluate`).
 
 Stage 1, retrieval: hit rate at k = 1, 3, 5 for every chunking design and
 search method, on the answerable questions of eval/questions.csv.
-Stage 2, end to end: agent answers, code checks, LLM judge, agreement with
-eval/human_labels.csv (added in Phase 7).
+Stage 2, end to end: the agent answers every question (saved one by one in
+eval/answers.jsonl), code checks (citations exist and were retrieved, refusals),
+a grading sheet for the human labels, the LLM judge with eval/rubric.md, and
+agreement between judge and eval/human_labels.csv. Tokens and seconds per question.
+Stage 3, NIS2 before/after for the questions only NIS2 answers.
 
-    uv run python evaluate.py                         # everything
-    uv run python evaluate.py --stage retrieval       # only hit rates
-    uv run python evaluate.py --questions other.csv   # another test set
+Answers, verdicts and hit rates are cached in eval/, so `main.py evaluate`
+re-runs without API calls once everything has been computed.
+
+    uv run python evaluate.py                         # everything (cached where possible)
+    uv run python evaluate.py --stage retrieval       # recompute hit rates
+    uv run python evaluate.py --stage answers         # agent answers + code checks + grading sheet (no judge)
+    uv run python evaluate.py --stage judge           # + judge and agreement
+    uv run python evaluate.py --stage nis2            # before/after table
 
 A hit for a question = a retrieved chunk from the expected regulation that
 covers the expected article/annex (paragraph numbers are ignored: a chunk of
@@ -17,15 +25,20 @@ needs every expected passage in the top k; the lenient one needs at least one.
 """
 
 import argparse
+import asyncio
 import csv
+import hashlib
+import json
 import re
 import sys
+import time
 from pathlib import Path
 
 import pandas as pd
+from pydantic import BaseModel, Field
 
-from ingest import DESIGNS
-from retrieval import METHODS, article_key, search
+from ingest import DESIGNS, collection
+from retrieval import METHODS, SERVED_DESIGN, article_key, search
 
 ROOT = Path(__file__).resolve().parent
 EVAL = ROOT / "eval"
@@ -95,10 +108,270 @@ def retrieval_eval(questions: list[dict]) -> pd.DataFrame:
     return summary
 
 
+# ================================================================ end to end
+
+ANSWERS = EVAL / "answers.jsonl"            # one agent answer per question (before NIS2 is added)
+JUDGMENTS = EVAL / "judgments.jsonl"        # one judge verdict per answer
+HUMAN = EVAL / "human_labels.csv"
+LABEL_SHEET = EVAL / "to_label.md"
+RUBRIC = EVAL / "rubric.md"
+NIS2_AFTER = EVAL / "nis2_after.jsonl"
+JUDGE_MODEL = "gemini-3.1-flash-lite"       # Phase 6 decision 8: different from the agent's model
+NIS2_FILE = "corpus/raw/L_2022333EN.01008001.xml.html"
+NIS2_QUESTIONS = ("q28", "q29")
+
+
+def read_jsonl(path: Path) -> dict[str, dict]:
+    if not path.is_file():
+        return {}
+    rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    return {r["id"]: r for r in rows}
+
+
+def append_jsonl(path: Path, row: dict) -> None:
+    with path.open("a", encoding="utf-8") as f:
+        f.write(json.dumps(row, ensure_ascii=False) + "\n")
+
+
+def deny(tool: str, args: dict) -> bool:
+    """The evaluation never approves add_document; NIS2 is added in its own step."""
+    return False
+
+
+def nis2_indexed() -> bool:
+    return bool(collection(SERVED_DESIGN).get(where={"doc": "NIS2"}, limit=1, include=[])["ids"])
+
+
+def collect_answers(questions: list[dict], path: Path = ANSWERS) -> dict[str, dict]:
+    """Run the agent on every question without a saved answer; save each one as soon as it arrives."""
+    from agent import ask_many
+    have = read_jsonl(path)
+    todo = [q for q in questions if q["id"] not in have]
+    if todo:
+        if path == ANSWERS and nis2_indexed():
+            raise SystemExit("NIS2 is already in the index: answers for the main evaluation must be collected "
+                             "before it is added. Restore index/ from git or keep the saved answers.")
+        print(f"  asking the agent {len(todo)} question(s)...", file=sys.stderr, flush=True)
+        pending = iter(todo)
+
+        def save(r: dict) -> None:
+            q = next(pending)
+            row = {"id": q["id"], "kind": q["kind"], **r}
+            append_jsonl(path, row)
+            print(f"  {q['id']}: {r['seconds']}s, {r['total_tokens']} tokens, refused={r['refused']}",
+                  file=sys.stderr, flush=True)
+
+        asyncio.run(ask_many([q["question"] for q in todo], approver=deny, on_result=save))
+    return read_jsonl(path)
+
+
+REF = re.compile(r"^(GDPR|AI Act|Data Act|NIS2) (.+)$")
+
+
+def split_ref(ref: str) -> tuple[str, str]:
+    """'AI Act Annex III' -> ('AI Act', 'Annex III')."""
+    m = REF.match(ref)
+    return (m.group(1), m.group(2)) if m else ("", ref)
+
+
+def index_refs() -> set[tuple[str, str]]:
+    """Every (regulation, 'Article N' / 'Annex X') present in the served index."""
+    got = collection(SERVED_DESIGN).get(include=["metadatas"])
+    return {(m["doc"], c) for m in got["metadatas"] for c in m["covers"].split("|")}
+
+
+def code_checks(questions: list[dict], answers: dict) -> pd.DataFrame:
+    """What code can check without interpreting the answer."""
+    refs = index_refs()
+    rows = []
+    for q in questions:
+        a = answers[q["id"]]
+        cited = {split_ref(c) for c in a["citations"]}
+        retrieved = {split_ref(r) for r in a["retrieved"]}
+        expected = set(q["expected"])
+        answerable = q["kind"] != "unanswerable"
+        if answerable:
+            outcome = "wrong refusal" if a["refused"] else "answered"
+        else:
+            outcome = "correct refusal" if a["refused"] else "answered unanswerable"
+        rows.append({
+            "id": q["id"], "kind": q["kind"], "outcome": outcome,
+            "n_citations": len(cited),
+            "citations_in_index": int(cited <= refs),
+            "citations_retrieved": int(cited <= retrieved),
+            "expected_retrieved": int(expected <= retrieved) if answerable else None,
+            "expected_cited": round(len(expected & cited) / len(expected), 2) if answerable else None,
+            "guardrail_fired": int(any(g["fired"] for g in a["guardrails"] if g["guardrail"] == "citations")),
+            "withheld": int("withheld by the citation check" in a["answer"]),
+            "tool_calls": a["tool_calls"], "searches": sum(1 for t in a["trace"] if t["tool"] == "search"),
+            "input_tokens": a["input_tokens"], "output_tokens": a["output_tokens"],
+            "total_tokens": a["total_tokens"], "seconds": a["seconds"],
+        })
+    df = pd.DataFrame(rows)
+    df.to_csv(EVAL / "code_checks.csv", index=False)
+    return df
+
+
+def write_label_sheet(questions: list[dict], answers: dict) -> None:
+    """Everything a human needs to grade, and nothing from the judge."""
+    lines = ["# Answers to grade by hand",
+             "", "Fill eval/human_labels.csv (id, correct, supported, notes) with the rules in eval/rubric.md, "
+             "before looking at eval/judgments.jsonl.", ""]
+    for q in questions:
+        a = answers[q["id"]]
+        lines += [f"## {q['id']} ({q['kind']})", "",
+                  f"**Question.** {q['question']}", "",
+                  f"**Reference.** {q['reference_answer']}"
+                  + (f" *(expected: {q['expected_source']} {q['expected_location']})*" if q["expected_source"] else ""), "",
+                  "**Agent answer.**", "", a["answer"], "",
+                  f"**Cited:** {', '.join(a['citations']) or 'none'}  ",
+                  f"**Retrieved:** {', '.join(a['retrieved']) or 'none'}", "",
+                  "<details><summary>Retrieved passages (full text)</summary>", "", "```",
+                  a["retrieved_text"] or "(no search)", "```", "</details>", "", "---", ""]
+    LABEL_SHEET.write_text("\n".join(lines), encoding="utf-8")
+
+
+class Verdict(BaseModel):
+    correct: int = Field(description="1 or 0, following the rubric")
+    correct_reason: str
+    supported: int = Field(description="1 or 0, following the rubric")
+    supported_reason: str
+
+
+def judge_one(q: dict, a: dict, rubric: str) -> dict:
+    from google.genai import types
+    from ingest import _gemini
+    prompt = (f"You are grading an answer of a legal question-answering assistant.\n\n{rubric}\n\n"
+              f"## Item to grade\n\nQuestion kind: {q['kind']}\n\nQuestion: {q['question']}\n\n"
+              f"Reference answer: {q['reference_answer']}\n\n"
+              f"Retrieved passages:\n<<<\n{a['retrieved_text'] or '(the assistant did not search)'}\n>>>\n\n"
+              f"Assistant answer:\n<<<\n{a['answer']}\n>>>\n\n"
+              "Return the two scores with a one- or two-sentence reason each.")
+    for attempt in range(5):
+        try:
+            r = _gemini().models.generate_content(
+                model=JUDGE_MODEL, contents=prompt,
+                config=types.GenerateContentConfig(temperature=0, response_mime_type="application/json",
+                                                   response_schema=Verdict))
+            v = Verdict.model_validate_json(r.text)
+            u = r.usage_metadata
+            return {**v.model_dump(), "judge_tokens": u.total_token_count}
+        except Exception as e:  # noqa: BLE001 - rate limits and the odd malformed reply: wait and retry
+            print(f"  judge {q['id']}: {type(e).__name__}, retrying", file=sys.stderr, flush=True)
+            time.sleep(15 * (attempt + 1))
+    raise RuntimeError(f"Judge failed on {q['id']}")
+
+
+def run_judge(questions: list[dict], answers: dict) -> dict[str, dict]:
+    rubric = RUBRIC.read_text(encoding="utf-8")
+    rubric_hash = hashlib.sha256(rubric.encode()).hexdigest()[:12]
+    have = read_jsonl(JUDGMENTS)
+    for q in questions:
+        a = answers[q["id"]]
+        key = hashlib.sha256((a["answer"] + rubric_hash).encode()).hexdigest()[:16]
+        if q["id"] in have and have[q["id"]].get("key") == key:
+            continue
+        v = judge_one(q, a, rubric)
+        append_jsonl(JUDGMENTS, {"id": q["id"], "key": key, "model": JUDGE_MODEL, **v})
+        print(f"  judged {q['id']}: correct={v['correct']} supported={v['supported']}", file=sys.stderr, flush=True)
+    return read_jsonl(JUDGMENTS)   # last line per id wins
+
+
+def kappa(a: list[int], b: list[int]) -> float | None:
+    """Cohen's kappa for two binary raters."""
+    n = len(a)
+    if n == 0:
+        return None
+    po = sum(x == y for x, y in zip(a, b)) / n
+    pa, pb = sum(a) / n, sum(b) / n
+    pe = pa * pb + (1 - pa) * (1 - pb)
+    return None if pe == 1 else round((po - pe) / (1 - pe), 3)
+
+
+def agreement(judgments: dict) -> pd.DataFrame | None:
+    if not HUMAN.is_file():
+        return None
+    human = pd.read_csv(HUMAN, dtype={"id": str}).dropna(subset=["id"])
+    human = human[human["id"].str.strip() != ""]
+    if human.empty:
+        return None
+    rows, disagreements = [], []
+    for crit in ("correct", "supported"):
+        pairs = [(int(h[crit]), int(judgments[h["id"]][crit])) for _, h in human.iterrows()
+                 if h["id"] in judgments and pd.notna(h[crit])]
+        hs, js = [p[0] for p in pairs], [p[1] for p in pairs]
+        rows.append({"criterion": crit, "n": len(pairs),
+                     "agreement": round(sum(x == y for x, y in pairs) / len(pairs), 3) if pairs else None,
+                     "kappa": kappa(hs, js), "human_rate": round(sum(hs) / len(hs), 3) if hs else None,
+                     "judge_rate": round(sum(js) / len(js), 3) if js else None})
+        for _, h in human.iterrows():
+            j = judgments.get(h["id"])
+            if j and pd.notna(h[crit]) and int(h[crit]) != int(j[crit]):
+                disagreements.append({"id": h["id"], "criterion": crit, "human": int(h[crit]), "judge": int(j[crit]),
+                                      "human_notes": h.get("notes", ""), "judge_reason": j[f"{crit}_reason"]})
+    pd.DataFrame(disagreements).to_csv(EVAL / "disagreements.csv", index=False)
+    df = pd.DataFrame(rows)
+    df.to_csv(EVAL / "agreement.csv", index=False)
+    return df
+
+
+def summarise(checks: pd.DataFrame, judgments: dict) -> pd.DataFrame:
+    df = checks.copy()
+    df["correct"] = df["id"].map(lambda i: judgments.get(i, {}).get("correct"))
+    df["supported"] = df["id"].map(lambda i: judgments.get(i, {}).get("supported"))
+    df.to_csv(EVAL / "e2e_per_question.csv", index=False)
+    answerable = df[df.kind != "unanswerable"]
+    unanswerable = df[df.kind == "unanswerable"]
+    summary = {
+        "questions": len(df),
+        "correct (judge)": f"{int(df.correct.sum())}/{len(df)}" if df.correct.notna().all() else "not judged",
+        "correct answerable": f"{int(answerable.correct.sum())}/{len(answerable)}" if df.correct.notna().all() else "",
+        "unsupported (judge)": f"{int((df.supported == 0).sum())}/{len(df)}" if df.supported.notna().all() else "not judged",
+        "correct refusals": f"{(unanswerable.outcome == 'correct refusal').sum()}/{len(unanswerable)}",
+        "wrong refusals": f"{(answerable.outcome == 'wrong refusal').sum()}/{len(answerable)}",
+        "answered unanswerable": f"{(unanswerable.outcome == 'answered unanswerable').sum()}/{len(unanswerable)}",
+        "citations not retrieved": int((df.citations_retrieved == 0).sum()),
+        "citations not in index": int((df.citations_in_index == 0).sum()),
+        "citation guardrail fired": int(df.guardrail_fired.sum()),
+        "answers withheld": int(df.withheld.sum()),
+        "mean tokens / question": round(df.total_tokens.mean()),
+        "median tokens / question": round(df.total_tokens.median()),
+        "mean seconds / question": round(df.seconds.mean(), 1),
+        "median seconds / question": round(df.seconds.median(), 1),
+        "mean searches / question": round(df.searches.mean(), 2),
+    }
+    out = pd.DataFrame(list(summary.items()), columns=["metric", "value"])
+    out.to_csv(EVAL / "e2e_summary.csv", index=False)
+    return out
+
+
+def before_after(questions: list[dict], answers: dict) -> None:
+    """NIS2 experiment: the saved 'before' answers vs answers after NIS2 was added with add_document."""
+    if not nis2_indexed():
+        print(f"NIS2 not indexed yet. Add it through the agent (you approve at the prompt):\n"
+              f'  uv run python main.py ask "Please add the file {NIS2_FILE} to the index"')
+        return
+    picked = [q for q in questions if q["id"] in NIS2_QUESTIONS]
+    after = collect_answers(picked, NIS2_AFTER)
+    lines = ["# Before / after adding NIS2 (Directive (EU) 2022/2555) with add_document", ""]
+    for q in picked:
+        b, a = answers[q["id"]], after[q["id"]]
+        lines += [f"## {q['id']}: {q['question']}", "",
+                  f"**Before** (GDPR, AI Act, Data Act; refused={b['refused']}; cited: {', '.join(b['citations']) or 'none'})", "",
+                  b["answer"], "",
+                  f"**After** (+ NIS2; refused={a['refused']}; cited: {', '.join(a['citations']) or 'none'})", "",
+                  a["answer"], "", "---", ""]
+    (EVAL / "before_after.md").write_text("\n".join(lines), encoding="utf-8")
+    for q in picked:
+        print(f"  {q['id']}: before refused={answers[q['id']]['refused']} -> after refused={after[q['id']]['refused']}, "
+              f"cites {', '.join(after[q['id']]['citations']) or 'none'}")
+
+
 def main() -> int:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--stage", choices=["retrieval", "e2e", "all"], default="all")
+    p.add_argument("--stage", choices=["retrieval", "answers", "judge", "nis2", "all"], default="all")
     p.add_argument("--questions", type=Path, default=QUESTIONS)
+    p.add_argument("--rerun-retrieval", action="store_true", help="recompute hit rates instead of reusing them")
     a = p.parse_args()
 
     questions = read_questions(a.questions)
@@ -107,11 +380,33 @@ def main() -> int:
 
     if a.stage in ("retrieval", "all"):
         print("\n== Retrieval: hit rate at k (strict for multi: every expected passage in top k)")
-        summary = retrieval_eval(questions)
+        saved = EVAL / "retrieval_summary.csv"
+        if saved.is_file() and not a.rerun_retrieval and a.stage == "all":
+            print("(saved results, measured on the initial corpus before NIS2 was added; --rerun-retrieval to recompute)")
+            summary = pd.read_csv(saved)
+        else:
+            summary = retrieval_eval(questions)
         print(summary.to_string(index=False))
 
-    if a.stage in ("e2e", "all"):
-        print("\n== End-to-end evaluation: not implemented yet (Phase 7).")
+    if a.stage in ("answers", "judge", "all"):
+        print(f"\n== End to end: agent answers ({ANSWERS.name})")
+        answers = collect_answers(questions)
+        checks = code_checks(questions, answers)
+        write_label_sheet(questions, answers)
+        print(f"Code checks saved; grading sheet for humans: {LABEL_SHEET.relative_to(ROOT)}")
+        judgments = {}
+        if a.stage in ("judge", "all"):
+            print(f"\n== LLM judge ({JUDGE_MODEL}, rubric {RUBRIC.name})")
+            judgments = run_judge(questions, answers)
+            ag = agreement(judgments)
+            print("\n== Judge vs human labels")
+            print(ag.to_string(index=False) if ag is not None else "no human labels yet (eval/human_labels.csv)")
+        print("\n== Summary")
+        print(summarise(checks, judgments).to_string(index=False))
+
+    if a.stage in ("nis2", "all"):
+        print("\n== Before / after adding NIS2")
+        before_after(questions, read_jsonl(ANSWERS))
     return 0
 
 

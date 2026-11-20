@@ -39,6 +39,7 @@ ROOT = Path(__file__).resolve().parent
 MODEL = "gemini-3.5-flash-lite"          # Phase 6 decision 8 (judge uses a different model)
 MAX_TOOL_CALLS = 6
 MAX_MODEL_CALLS = 10
+TRANSIENT_RETRIES = 4                     # free-tier 503 "high demand" / 429: wait and retry the question
 REFUSAL = "The indexed legislation does not cover this question."
 REGULATIONS = r"GDPR|AI Act|Data Act|NIS2"
 CITATION = re.compile(rf"\b({REGULATIONS})\s*,?\s+((?:Article|Art\.?)\s*\d+[a-z]?|Annex\s+[IVXLC]+)\b")
@@ -201,9 +202,18 @@ async def ask_many(questions: list[str], approver: Callable[[str, dict], bool] =
             await session.initialize()
             specs = (await session.list_tools()).tools
             for q in questions:
-                events: list = []
-                agent = build_agent(mcp_tools(session, specs, approver, events))
-                r = await run_one(agent, q, events)
+                for attempt in range(TRANSIENT_RETRIES + 1):
+                    events: list = []
+                    agent = build_agent(mcp_tools(session, specs, approver, events))
+                    try:
+                        r = await run_one(agent, q, events)
+                        break
+                    except Exception as e:  # noqa: BLE001 - only overloads / rate limits are retried
+                        if attempt == TRANSIENT_RETRIES or not any(c in str(e) for c in ("503", "504", "429", "UNAVAILABLE")):
+                            raise
+                        wait = 30 * (attempt + 1)
+                        print(f"[agent] model busy ({str(e)[:60]}...), retrying in {wait}s", file=sys.stderr, flush=True)
+                        await asyncio.sleep(wait)
                 out.append(r)
                 if on_result:
                     on_result(r)

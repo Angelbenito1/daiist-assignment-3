@@ -54,6 +54,10 @@ def search(query: str) -> str:
         hits = retrieve(query, design=SERVED_DESIGN, method=SERVED_METHOD, k=DEFAULT_K)
     except QuotaExhausted as e:
         return f"Search unavailable: {e} Do not answer from memory; tell the user to try again later."
+    except Exception as e:  # noqa: BLE001 - e.g. a transient 503 from the embedding API
+        log(f"search failed: {type(e).__name__}: {e}")
+        return (f"Search failed ({type(e).__name__}); this is temporary. Try the search again once; "
+                "if it fails again, do not answer from memory.")
     if hits and hits[0]["score"] is not None and hits[0]["score"] < SIMILARITY_FLOOR:
         return (f"No relevant passages found for: {query} (best similarity {hits[0]['score']:.3f} is below "
                 f"{SIMILARITY_FLOOR}). The indexed legislation does not appear to cover this question.")
